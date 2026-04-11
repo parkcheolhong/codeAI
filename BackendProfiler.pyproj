@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <SchemaVersion>2.0</SchemaVersion>
+    <ProjectGuid>{2F0F62A8-4E65-4D7D-8B6A-0A6A21E75F11}</ProjectGuid>
+    <ProjectHome>.</ProjectHome>
+    <StartupFile>run_profiler_backend.py</StartupFile>
+    <SearchPath>.</SearchPath>
+    <WorkingDirectory>.</WorkingDirectory>
+    <OutputPath>.</OutputPath>
+    <Name>BackendProfiler</Name>
+    <RootNamespace>BackendProfiler</RootNamespace>
+    <InterpreterId>Global|PythonCore|3.13</InterpreterId>
+    <IsWindowsApplication>True</IsWindowsApplication>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="backend\generators\models.py" />
+    <Compile Include="run_profiler_backend.py" />
+    <Compile Include="backend\main.py" />
+    <Compile Include="backend\llm\orchestrator.py" />
+    <Compile Include="tools\inspect_python_fastapi_artifacts.py" />
+    <Compile Include="tools\rerun_past_failure_outputs.py" />
+    <Compile Include="tools\rerun_phaseb_only.py" />
+    <Compile Include="tools\verify_current_common_failures.py" />
+    <Compile Include="tools\verify_generator_checklist_fix.py" />
+    <Compile Include="tools\verify_generator_checklist_self_reference.py" />
+    <Compile Include="tools\verify_multi_code_generator.py" />
+    <Compile Include="tools\verify_multi_code_generator_semantic_gate.py" />
+    <Compile Include="tools\verify_python_fastapi_semantic_gate_fix.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="backend\" />
+    <Folder Include="backend\llm\" />
+    <Folder Include="docs\" />
+    <Folder Include="docs\checklists\" />
+    <Folder Include="frontend\frontend\app\.well-known\" />
+    <Folder Include="frontend\frontend\app\.well-known\webauthn\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include=".python-version" />
+    <Content Include="Dockerfile" />
+    <Content Include="docs\admin-dashboard-overview-legacy-block-checklist.md" />
+    <Content Include="docs\admin-dashboard-section-linkage-checklist.md" />
+    <Content Include="docs\admin-dashboard-ui-identification-id-table.md" />
+    <Content Include="docs\admin-dashboard-ui-ux-browser-blueprint.md" />
+    <Content Include="docs\backend-runtime-analysis-checklist.md" />
+    <Content Include="docs\checklists\python313-container-upgrade.md" />
+    <Content Include="docs\checklists\redis-runtime-recovery-warning-fix.md" />
+    <Content Include="docs\final_readiness_checklist.md" />
+    <Content Include="docs\frontend-stale-bundle-mitigation-checklist.md" />
+    <Content Include="docs\multi_generator_semantic_gate_verification.md" />
+    <Content Include="frontend\frontend\app\.well-known\webauthn\route.ts" />
+    <Content Include="frontend\frontend\app\admin\layout.tsx" />
+    <Content Include="frontend\frontend\app\marketplace\layout.tsx" />
+    <Content Include="frontend\frontend\components\ui\workspace-chrome.tsx" />
+    <Content Include="frontend\frontend\next.config.ts" />
+    <Content Include="frontend\frontend\tests\admin-system-settings-operational.playwright.spec.ts" />
+    <Content Include="pyproject.toml" />
+    <Content Include="rebuild-venv.ps1" />
+    <Content Include="rebuild_backend_python313_container.ps1" />
+    <Content Include="requirements.txt" />
+    <Content Include="run-current-venv-backend.ps1" />
+    <Content Include="run-docker-backend-stack.ps1" />
+    <Content Include="run_profiler_backend_container.ps1" />
+    <Content Include="toml pyproject.toml" />
+    <Content Include="verify_python313_container.ps1" />
+  </ItemGroup>
+  <ItemGroup>
+    <Interpreter Include="env1\">
+      <Id>env1</Id>
+      <Version>3.13</Version>
+      <Description>env1 (Python 3.13 (64-bit))</Description>
+      <InterpreterPath>Scripts\python.exe</InterpreterPath>
+      <WindowsInterpreterPath>Scripts\pythonw.exe</WindowsInterpreterPath>
+      <PathEnvironmentVariable>PYTHONPATH</PathEnvironmentVariable>
+      <Architecture>X64</Architecture>
+    </Interpreter>
+  </ItemGroup>
+  <ItemGroup>
+    <InterpreterReference Include="Global|PythonCore|3.13" />
+  </ItemGroup>
+</Project>

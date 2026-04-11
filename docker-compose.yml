@@ -1,0 +1,313 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: devanalysis114-postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_PASSWORD_FILE: ${POSTGRES_PASSWORD_FILE:-}
+      POSTGRES_DB: devanalysis114
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ${HOST_SECRET_ROOT:-./.runtime/secrets}:${CONTAINER_SECRET_ROOT:-/run/codeai-secrets}:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d devanalysis114"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+    networks:
+      - devanalysis114-network
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+    container_name: devanalysis114-minio
+    environment:
+      MINIO_ROOT_USER_FILE: /run/codeai-secrets/minio_access_key.txt
+      MINIO_ROOT_PASSWORD_FILE: /run/codeai-secrets/minio_secret_key.txt
+    volumes:
+      - minio-data:/data
+      - ${HOST_SECRET_ROOT:-./.runtime/secrets}:${CONTAINER_SECRET_ROOT:-/run/codeai-secrets}:ro
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - devanalysis114-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: devanalysis114-redis
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "6380:6379"
+    networks:
+      - devanalysis114-network
+
+  qdrant:
+    image: qdrant/qdrant:v1.16.2
+    container_name: devanalysis114-qdrant
+    volumes:
+      - qdrant-data:/qdrant/storage
+    ports:
+      - "6333:6333"
+    networks:
+      - devanalysis114-network
+
+  backend:
+    image: devanalysis114-backend
+    container_name: devanalysis114-backend
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL_FILE: ${DATABASE_URL_FILE:-}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_PASSWORD_FILE: ${POSTGRES_PASSWORD_FILE:-}
+      POSTGRES_DB: ${POSTGRES_DB:-devanalysis114}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      SECRET_KEY: ${JWT_SECRET_KEY:-}
+      SECRET_KEY_FILE: ${JWT_SECRET_KEY_FILE:-}
+      CORS_ORIGINS: http://localhost:3000,http://localhost:3005,http://127.0.0.1:3000,http://127.0.0.1:3005
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: ${CUDA_MPS_ACTIVE_THREAD_PERCENTAGE:-80}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+      MINIO_ACCESS_KEY_FILE: ${MINIO_ACCESS_KEY_FILE:-}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+      MINIO_SECRET_KEY_FILE: ${MINIO_SECRET_KEY_FILE:-}
+      MINIO_BUCKET: marketplace-projects
+      FFMPEG_BIN: ffmpeg
+      VIDEO_EXTERNAL_API_URL: ${VIDEO_EXTERNAL_API_URL:-}
+      VIDEO_EXTERNAL_API_KEY: ${VIDEO_EXTERNAL_API_KEY:-}
+      VIDEO_EXTERNAL_API_KEY_FILE: ${VIDEO_EXTERNAL_API_KEY_FILE:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_KEY_FILE: ${AZURE_OPENAI_API_KEY_FILE:-}
+      AZURE_OPENAI_VIDEO_DEPLOYMENT_NAME: ${AZURE_OPENAI_VIDEO_DEPLOYMENT_NAME:-sora-2}
+      AZURE_OPENAI_VISION_DEPLOYMENT_NAME: ${AZURE_OPENAI_VISION_DEPLOYMENT_NAME:-gpt-4o}
+      VIDEO_DEDICATED_ENGINE_URL: ${VIDEO_DEDICATED_ENGINE_URL:-}
+      VIDEO_DEDICATED_ENGINE_API_KEY: ${VIDEO_DEDICATED_ENGINE_API_KEY:-}
+      VIDEO_DEDICATED_ENGINE_API_KEY_FILE: ${VIDEO_DEDICATED_ENGINE_API_KEY_FILE:-}
+      VIDEO_DEDICATED_SUBMIT_PATH: ${VIDEO_DEDICATED_SUBMIT_PATH:-/jobs}
+      VIDEO_DEDICATED_TIMEOUT_SEC: ${VIDEO_DEDICATED_TIMEOUT_SEC:-900}
+      VIDEO_DEDICATED_POLL_SEC: ${VIDEO_DEDICATED_POLL_SEC:-2}
+      VIDEO_ALLOW_LOCAL_DEDICATED_ENGINE: ${VIDEO_ALLOW_LOCAL_DEDICATED_ENGINE:-false}
+      VIDEO_ENGINE_FALLBACK_TO_INTERNAL: ${VIDEO_ENGINE_FALLBACK_TO_INTERNAL:-false}
+      VIDEO_REQUIRE_GENERATIVE_ENGINE: ${VIDEO_REQUIRE_GENERATIVE_ENGINE:-true}
+      ENABLE_AD_ORDER_WORKER_BOOTSTRAP: ${ENABLE_AD_ORDER_WORKER_BOOTSTRAP:-true}
+      ENABLE_SELF_RUN_VIDEO_WORKER_BOOTSTRAP: ${ENABLE_SELF_RUN_VIDEO_WORKER_BOOTSTRAP:-false}
+      AD_TOTAL_SECONDS: ${AD_TOTAL_SECONDS:-60}
+      AD_CUT_COUNT: ${AD_CUT_COUNT:-6}
+      LLM_MODEL_DEFAULT: ${LLM_MODEL_DEFAULT:-qwen2.5-coder:32b-q5km}
+      LLM_MODEL_REASONING: ${LLM_MODEL_REASONING:-qwen2.5-coder:32b-q6k}
+      LLM_MODEL_CODING: ${LLM_MODEL_CODING:-qwen2.5-coder:32b-q5km}
+      LLM_MODEL_CHAT: ${LLM_MODEL_CHAT:-qwen2.5-coder:32b-q4km}
+      LLM_MODEL_VOICE_CHAT: ${LLM_MODEL_VOICE_CHAT:-qwen2.5-coder:32b-q4km}
+      LLM_MODEL_PLANNER: ${LLM_MODEL_PLANNER:-qwen2.5-coder:32b-q4km}
+      LLM_MODEL_CODER: ${LLM_MODEL_CODER:-qwen2.5-coder:32b-q5km}
+      LLM_MODEL_REVIEWER: ${LLM_MODEL_REVIEWER:-qwen2.5-coder:32b-q5km}
+      LLM_MODEL_DESIGNER: ${LLM_MODEL_DESIGNER:-qwen2.5-coder:32b-q5km}
+      LLM_MODEL_SMART_PLANNER: ${LLM_MODEL_SMART_PLANNER:-qwen2.5-coder:32b-q5km}
+      LLM_MODEL_SMART_EXECUTOR: ${LLM_MODEL_SMART_EXECUTOR:-qwen2.5-coder:32b-q5km}
+      LLM_MODEL_SMART_DESIGNER: ${LLM_MODEL_SMART_DESIGNER:-qwen2.5-coder:32b-q5km}
+      ORCH_FORCE_COMPLETE: ${ORCH_FORCE_COMPLETE:-false}
+      ORCH_MIN_FILES: ${ORCH_MIN_FILES:-27}
+      ORCH_MIN_DIRS: ${ORCH_MIN_DIRS:-3}
+      ORCH_MAX_FORCE_RETRIES: ${ORCH_MAX_FORCE_RETRIES:-60}
+      ORCH_REQUIRED_FILES: ${ORCH_REQUIRED_FILES:-README.md,requirements.txt,app/main.py,app/routes.py,tests/test_health.py,.gitignore}
+      ADMIN_PROBE_BASE_URL: ${ADMIN_PROBE_BASE_URL:-https://nginx}
+      ADMIN_PROBE_HOST: ${ADMIN_PROBE_HOST:-metanova1004.com}
+      ADMIN_PROBE_VERIFY_SSL: ${ADMIN_PROBE_VERIFY_SSL:-false}
+      PASSKEY_RP_ID: ${PASSKEY_RP_ID:-metanova1004.com}
+      PASSKEY_EXPECTED_ORIGIN: ${PASSKEY_EXPECTED_ORIGIN:-https://metanova1004.com}
+      MARKETPLACE_UPLOAD_ROOT: ${MARKETPLACE_UPLOAD_ROOT:-/app/uploads}
+      TMPDIR: ${MARKETPLACE_UPLOAD_ROOT:-/app/uploads}/tmp
+      MARKETPLACE_RETENTION_DAYS: ${MARKETPLACE_RETENTION_DAYS:-30}
+      MARKETPLACE_TEMP_RETENTION_DAYS: ${MARKETPLACE_TEMP_RETENTION_DAYS:-7}
+      AD_DOWNLOAD_MIN_NOTICE_MINUTES: ${AD_DOWNLOAD_MIN_NOTICE_MINUTES:-60}
+      AD_DOWNLOAD_WINDOW_DAYS: ${AD_DOWNLOAD_WINDOW_DAYS:-30}
+      AD_DOWNLOAD_MAX_COUNT: ${AD_DOWNLOAD_MAX_COUNT:-2}
+    volumes:
+      - ./.env:/app/.env
+      - ./README.md:/app/README.md:ro
+      - ./AGENTS.md:/app/AGENTS.md:ro
+      - ./package.json:/app/package.json:ro
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
+      - ./backend:/app/backend
+      - ./docs:/app/docs
+      - ./frontend:/app/frontend
+      - ./knowledge:/app/knowledge
+      - ./models:/app/models
+      - ./reports:/app/reports
+      - ${MARKETPLACE_HOST_ROOT:-./uploads}:/app/uploads
+      - ${HOST_SECRET_ROOT:-./.runtime/secrets}:${CONTAINER_SECRET_ROOT:-/run/codeai-secrets}:ro
+    ports:
+      - "0.0.0.0:8000:8000"
+    cpus: ${BACKEND_CPU_LIMIT_CORES:-20.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: >-
+      python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+    networks:
+      - devanalysis114-network
+
+  video-worker:
+    image: devanalysis114-backend
+    container_name: devanalysis114-video-worker
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL_FILE: ${DATABASE_URL_FILE:-}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_PASSWORD_FILE: ${POSTGRES_PASSWORD_FILE:-}
+      POSTGRES_DB: ${POSTGRES_DB:-devanalysis114}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+      CUDA_MPS_ACTIVE_THREAD_PERCENTAGE: ${CUDA_MPS_ACTIVE_THREAD_PERCENTAGE:-80}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+      MINIO_ACCESS_KEY_FILE: ${MINIO_ACCESS_KEY_FILE:-}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+      MINIO_SECRET_KEY_FILE: ${MINIO_SECRET_KEY_FILE:-}
+      MINIO_BUCKET: marketplace-projects
+      FFMPEG_BIN: ffmpeg
+      VIDEO_EXTERNAL_API_URL: ${VIDEO_EXTERNAL_API_URL:-}
+      VIDEO_EXTERNAL_API_KEY: ${VIDEO_EXTERNAL_API_KEY:-}
+      VIDEO_EXTERNAL_API_KEY_FILE: ${VIDEO_EXTERNAL_API_KEY_FILE:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_KEY_FILE: ${AZURE_OPENAI_API_KEY_FILE:-}
+      AZURE_OPENAI_VIDEO_DEPLOYMENT_NAME: ${AZURE_OPENAI_VIDEO_DEPLOYMENT_NAME:-sora-2}
+      AZURE_OPENAI_VISION_DEPLOYMENT_NAME: ${AZURE_OPENAI_VISION_DEPLOYMENT_NAME:-gpt-4o}
+      VIDEO_DEDICATED_ENGINE_URL: ${VIDEO_DEDICATED_ENGINE_URL:-}
+      VIDEO_DEDICATED_ENGINE_API_KEY: ${VIDEO_DEDICATED_ENGINE_API_KEY:-}
+      VIDEO_DEDICATED_ENGINE_API_KEY_FILE: ${VIDEO_DEDICATED_ENGINE_API_KEY_FILE:-}
+      VIDEO_DEDICATED_SUBMIT_PATH: ${VIDEO_DEDICATED_SUBMIT_PATH:-/jobs}
+      VIDEO_DEDICATED_TIMEOUT_SEC: ${VIDEO_DEDICATED_TIMEOUT_SEC:-900}
+      VIDEO_DEDICATED_POLL_SEC: ${VIDEO_DEDICATED_POLL_SEC:-2}
+      VIDEO_ALLOW_LOCAL_DEDICATED_ENGINE: ${VIDEO_ALLOW_LOCAL_DEDICATED_ENGINE:-false}
+      VIDEO_ENGINE_FALLBACK_TO_INTERNAL: ${VIDEO_ENGINE_FALLBACK_TO_INTERNAL:-false}
+      VIDEO_REQUIRE_GENERATIVE_ENGINE: ${VIDEO_REQUIRE_GENERATIVE_ENGINE:-true}
+      AD_TOTAL_SECONDS: ${AD_TOTAL_SECONDS:-60}
+      AD_CUT_COUNT: ${AD_CUT_COUNT:-6}
+      MARKETPLACE_UPLOAD_ROOT: ${MARKETPLACE_UPLOAD_ROOT:-/app/uploads}
+      TMPDIR: ${MARKETPLACE_UPLOAD_ROOT:-/app/uploads}/tmp
+      MARKETPLACE_RETENTION_DAYS: ${MARKETPLACE_RETENTION_DAYS:-30}
+      MARKETPLACE_TEMP_RETENTION_DAYS: ${MARKETPLACE_TEMP_RETENTION_DAYS:-7}
+      VIDEO_RENDER_QUEUE_NAME: ${VIDEO_RENDER_QUEUE_NAME:-video_render_queue}
+    volumes:
+      - ./backend:/app/backend
+      - ./docs:/app/docs
+      - ./knowledge:/app/knowledge
+      - ./models:/app/models
+      - ${MARKETPLACE_HOST_ROOT:-./uploads}:/app/uploads
+      - ./scripts:/app/scripts
+      - ${HOST_SECRET_ROOT:-./.runtime/secrets}:${CONTAINER_SECRET_ROOT:-/run/codeai-secrets}:ro
+    cpus: ${VIDEO_WORKER_CPU_LIMIT_CORES:-5.6}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: python scripts/start_video_render_worker.py
+    networks:
+      - devanalysis114-network
+
+  frontend-admin:
+    image: devanalysis114-frontend-admin
+    container_name: devanalysis114-frontend-admin
+    build:
+      context: ./frontend/frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ""
+        NEXT_PUBLIC_SITE_URL: https://metanova1004.com
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      NEXT_PUBLIC_API_URL: ""
+      NEXT_PUBLIC_SITE_URL: https://metanova1004.com
+      BACKEND_PROXY_TARGET: http://backend:8000
+      LOCAL_API_BASE_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      devanalysis114-network:
+        aliases:
+          - frontend-admin
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: devanalysis114-nginx
+    depends_on:
+      backend:
+        condition: service_started
+      frontend-admin:
+        condition: service_started
+    volumes:
+      - ./nginx/nginx.conf/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certbot/local-certs:/etc/nginx/local-certs:ro
+      - ./certbot/www:/var/www/certbot
+    ports:
+      - target: 80
+        published: ${NGINX_HTTP_PORT:-8080}
+        protocol: tcp
+        host_ip: 0.0.0.0
+      - target: 443
+        published: ${NGINX_HTTPS_PORT:-8443}
+        protocol: tcp
+        host_ip: 0.0.0.0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - devanalysis114-network
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  minio-data:
+
+networks:
+  devanalysis114-network:
+    driver: bridge
