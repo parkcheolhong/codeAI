@@ -1,4 +1,4 @@
-﻿{
+{
     "scripts": {
         "dev:marketplace": "cmd /c \"set LOCAL_FRONTEND_ROLE=marketplace&& npm --prefix frontend/frontend run dev -- --port 3000\"",
         "dev:admin": "cmd /c \"set LOCAL_FRONTEND_ROLE=admin&& npm --prefix frontend/frontend run dev -- --port 3005\"",
