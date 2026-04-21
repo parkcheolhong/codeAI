@@ -1,5 +1,5 @@
 ﻿from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text, inspect, func
 from typing import Any, Callable, Dict, List, Optional
@@ -45,6 +45,11 @@ from .self_run_video_worker import enqueue_self_run_video_job, get_self_run_vide
 from .story_state_engine import build_story_states
 from .video_generation_engine import run_video_generation_engine
 from .database import get_db, engine, SessionLocal
+from .feature_orchestrator.engines.spreadsheet_generation_engine import (
+    build_spreadsheet_preview,
+    render_spreadsheet_final,
+    review_spreadsheet_quality,
+)
 from .minio_service import minio_service
 from .payment_service import payment_service, download_token_service
 from backend.auth import get_current_user
@@ -53,6 +58,7 @@ from backend.orchestration_stage_service import (
     build_stage_tracking_payload,
     initialize_stage_run,
     load_stage_run,
+    save_stage_run,
     update_stage_run,
 )
 from backend.orchestrator.chat import AutoConnectMeta, OrchestratorChatRequest, OrchestratorChatResponse, OrchestratorStageChatContext
@@ -128,36 +134,208 @@ _VIDEO_QUEUE_REDIS_CACHE_TTL_SEC = 5.0
 router = APIRouter()
 
 
-@router.get("/projects", response_model=schemas.ProjectList)
-def list_marketplace_projects(
-    skip: int = 0,
-    limit: int = 24,
-    search: Optional[str] = None,
-    category_id: Optional[int] = None,
-    min_price: Optional[float] = None,
-    max_price: Optional[float] = None,
-    sort_by: str = "created_at",
-    sort_order: str = "desc",
-    db: Session = Depends(get_db),
-):
-    projects, total = crud.get_projects(
-        db=db,
-        skip=max(0, skip),
-        limit=max(1, min(limit, 100)),
-        search=search,
-        category_id=category_id,
-        min_price=min_price,
-        max_price=max_price,
-        sort_by=sort_by,
-        order=sort_order,
-    )
-    return schemas.ProjectList(
-        projects=projects,
-        total=total,
-        skip=max(0, skip),
-        limit=max(1, min(limit, 100)),
-    )
+class FeatureOrchestrateAcceptedRequest(BaseModel):
+    feature_id: str
+    project_name: str
+    prompt: str
+    template_id: Optional[str] = None
+    photo_reference: Optional[str] = None
+    photo_content_type: Optional[str] = None
+    photo_size: Optional[int] = None
+    final_enabled: bool = True
+    context_tags: List[str] = []
 
+
+class FeatureOrchestrateStreamRequest(BaseModel):
+    run_id: str
+
+
+class FeatureOrchestrateAcceptedResponse(BaseModel):
+    accepted: bool
+    run_id: str
+    stage_run: Dict[str, Any]
+    status: str
+    stream_url: str
+    poll_url: str
+
+
+class FeatureOrchestratorRuntimeService:
+    def get_catalog(self) -> List[Dict[str, Any]]:
+        return list(_FEATURE_CATALOG)
+
+    def get_service(self, feature_id: str) -> "FeatureOrchestratorRuntimeService":
+        normalized = str(feature_id or "").strip().lower()
+        if normalized != "ai-sheet":
+            raise ValueError("지원하지 않는 feature_id 입니다.")
+        return self
+
+    def run_preview_phase(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return build_spreadsheet_preview(payload)
+
+    def run_final_phase(self, payload: Dict[str, Any], preview_artifact: Dict[str, Any]) -> Dict[str, Any]:
+        return render_spreadsheet_final(payload, preview_artifact)
+
+    def run_quality_gate(
+        self,
+        payload: Dict[str, Any],
+        preview_artifact: Dict[str, Any],
+        final_artifact: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return review_spreadsheet_quality(payload, preview_artifact, final_artifact)
+
+    def build_artifact_manifest(
+        self,
+        preview_artifact: Dict[str, Any],
+        final_artifact: Dict[str, Any],
+        quality_review: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "preview_artifact": preview_artifact,
+            "final_artifact": final_artifact,
+            "quality_review": quality_review,
+        }
+
+
+_FEATURE_CATALOG: List[Dict[str, Any]] = [
+    {
+        "feature_id": "ai-sheet",
+        "title": "AI 엑셀 시트",
+        "summary": "프롬프트 기반으로 시트 schema preview 와 최종 workbook 패키지를 생성합니다.",
+        "popup_mode": "spreadsheet-builder",
+        "status": "ready",
+        "supports_photo_upload": False,
+        "supports_final_phase": True,
+    },
+]
+
+_feature_runtime_service = FeatureOrchestratorRuntimeService()
+
+_FEATURE_POPUP_STAGE_MAP = {
+    "accepted": "ARCH-001",
+    "preview_running": "ARCH-007",
+    "preview_ready": "ARCH-008",
+    "final_running": "ARCH-009",
+    "quality_review": "ARCH-010",
+    "completed": "ARCH-010",
+    "completed_preview_only": "ARCH-010",
+    "failed": "ARCH-010",
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _build_feature_sse_event(event: str, payload: Dict[str, Any]) -> str:
+    return f"data: {json.dumps({'event': event, 'payload': payload}, ensure_ascii=False)}\n\n"
+
+
+def _build_feature_progress_payload(
+    run_id: str,
+    *,
+    percent: int,
+    step: str,
+    state: str,
+    message: str,
+) -> Dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "state": state,
+        "progress": {
+            "percent": max(0, min(100, int(percent))),
+            "step": step,
+            "message": message,
+            "updated_at": _utc_now_iso(),
+        },
+    }
+
+
+def _get_feature_stage_run_or_404(run_id: str) -> Dict[str, Any]:
+    payload = load_stage_run(run_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="feature stage run을 찾을 수 없습니다.")
+    return payload
+
+
+def _get_feature_metadata(stage_run_payload: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = dict(stage_run_payload.get("metadata") or {})
+    return dict(metadata.get("feature_orchestrator") or {})
+
+
+def _set_feature_metadata(stage_run_payload: Dict[str, Any], feature_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = dict(stage_run_payload.get("metadata") or {})
+    metadata["feature_orchestrator"] = feature_metadata
+    stage_run_payload["metadata"] = metadata
+    return stage_run_payload
+
+
+def _apply_feature_popup_state(stage_run_payload: Dict[str, Any], popup_state: str, note: str = "") -> Dict[str, Any]:
+    target_stage_id = _FEATURE_POPUP_STAGE_MAP.get(popup_state, "ARCH-010")
+    ordered_ids = [item["id"] for item in ORCHESTRATION_STAGE_DEFINITIONS]
+    target_index = ordered_ids.index(target_stage_id) if target_stage_id in ordered_ids else len(ordered_ids) - 1
+    now = _utc_now_iso()
+    for index, stage in enumerate(stage_run_payload.get("stages") or []):
+        if index < target_index:
+            stage["status"] = "passed"
+            stage["check_label"] = "통과"
+        elif index == target_index:
+            if popup_state == "failed":
+                stage["status"] = "failed"
+                stage["check_label"] = "미통과"
+            elif popup_state in {"completed", "completed_preview_only"}:
+                stage["status"] = "passed"
+                stage["check_label"] = "통과"
+            else:
+                stage["status"] = "running"
+                stage["check_label"] = "진행 중"
+            if note:
+                stage["note"] = note
+        else:
+            stage["status"] = "pending"
+            stage["check_label"] = "대기"
+        stage["updated_at"] = now
+    stage_run_payload["current_stage_id"] = target_stage_id
+    stage_run_payload["status"] = "blocked" if popup_state == "failed" else "completed" if popup_state in {"completed", "completed_preview_only"} else "running"
+    stage_run_payload["final_completed"] = popup_state == "completed"
+    return stage_run_payload
+
+
+def _iter_feature_artifacts(feature_metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
+    artifacts: List[Dict[str, Any]] = []
+    for key in ("preview_artifact", "final_artifact"):
+        artifact = feature_metadata.get(key)
+        if isinstance(artifact, dict):
+            artifacts.append(dict(artifact))
+    manifest = feature_metadata.get("artifact_manifest")
+    if isinstance(manifest, dict):
+        for key in ("preview_artifact", "final_artifact"):
+            artifact = manifest.get(key)
+            if isinstance(artifact, dict):
+                artifacts.append(dict(artifact))
+    return artifacts
+
+
+def _resolve_feature_delivery_asset_or_404(run_id: str, asset_format: str) -> Dict[str, Any]:
+    stage_run = _get_feature_stage_run_or_404(run_id)
+    feature_metadata = _get_feature_metadata(stage_run)
+    normalized_format = str(asset_format or "").strip().lower()
+    if not normalized_format:
+        raise HTTPException(status_code=400, detail="asset format 이 필요합니다.")
+
+    for artifact in _iter_feature_artifacts(feature_metadata):
+        for asset in list(artifact.get("delivery_assets") or []):
+            if str(asset.get("format") or "").strip().lower() != normalized_format:
+                continue
+            asset_path = Path(str(asset.get("path") or "")).expanduser()
+            if not asset_path.exists() or not asset_path.is_file():
+                raise HTTPException(status_code=404, detail="delivery asset 파일이 존재하지 않습니다.")
+            return {
+                "artifact": artifact,
+                "asset": asset,
+                "path": asset_path.resolve(),
+            }
+
+    raise HTTPException(status_code=404, detail="요청한 delivery asset 을 찾을 수 없습니다.")
 
 @router.get("/projects/{project_id}", response_model=schemas.Project)
 def get_marketplace_project(
@@ -204,6 +382,245 @@ def list_marketplace_categories(request: Request, response: Response, db: Sessio
         _MARKETPLACE_CATEGORIES_CACHE["captured_at"] = now_ts
         _MARKETPLACE_CATEGORIES_CACHE["payload"] = payload
         return payload
+
+
+@router.get("/feature-catalog")
+def get_marketplace_feature_catalog() -> List[Dict[str, Any]]:
+    return _feature_runtime_service.get_catalog()
+
+
+@router.post(
+    "/feature-orchestrate/accepted",
+    response_model=FeatureOrchestrateAcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def accept_marketplace_feature_orchestration(
+    request: FeatureOrchestrateAcceptedRequest,
+) -> FeatureOrchestrateAcceptedResponse:
+    request_payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    feature_id = str(request_payload.get("feature_id") or "").strip()
+    service = _feature_runtime_service.get_service(feature_id)
+
+    stage_run = initialize_stage_run(
+        scope="marketplace-feature-orchestrator",
+        project_name=str(request_payload.get("project_name") or feature_id or "marketplace-feature-run"),
+        mode="feature-popup",
+        metadata={},
+    )
+    feature_metadata = {
+        "feature_id": feature_id,
+        "popup_state": "accepted",
+        "request": request_payload,
+        "artifact_manifest": {
+            "preview_artifact_id": None,
+            "final_artifact_id": None,
+        },
+        "last_event": None,
+        "updated_at": _utc_now_iso(),
+        "service": service.__class__.__name__,
+    }
+    stage_run = _set_feature_metadata(stage_run, feature_metadata)
+    stage_run = _apply_feature_popup_state(stage_run, "accepted")
+    stage_run = save_stage_run(stage_run)
+    return FeatureOrchestrateAcceptedResponse(
+        accepted=True,
+        run_id=str(stage_run.get("run_id") or ""),
+        stage_run=stage_run,
+        status="accepted",
+        stream_url="/api/marketplace/feature-orchestrate/stream",
+        poll_url=f"/api/marketplace/feature-orchestrate/stage-runs/{stage_run.get('run_id')}",
+    )
+
+
+@router.post("/feature-orchestrate/stream")
+async def stream_marketplace_feature_orchestration(
+    request: FeatureOrchestrateStreamRequest,
+) -> StreamingResponse:
+    stage_run = _get_feature_stage_run_or_404(request.run_id)
+    feature_metadata = _get_feature_metadata(stage_run)
+    feature_id = str(feature_metadata.get("feature_id") or "").strip()
+    request_payload = dict(feature_metadata.get("request") or {})
+    if not feature_id or not request_payload:
+        raise HTTPException(status_code=400, detail="feature orchestrator 요청 메타데이터가 없습니다.")
+    service = _feature_runtime_service.get_service(feature_id)
+
+    async def event_stream():
+        local_stage_run = _get_feature_stage_run_or_404(request.run_id)
+        local_metadata = _get_feature_metadata(local_stage_run)
+
+        def _persist_progress(*, percent: int, step: str, state: str, message: str) -> None:
+            progress_payload = {
+                "percent": max(0, min(100, int(percent))),
+                "step": step,
+                "state": state,
+                "message": message,
+                "updated_at": _utc_now_iso(),
+            }
+            local_metadata["progress"] = progress_payload
+            local_metadata["updated_at"] = progress_payload["updated_at"]
+
+        try:
+            local_metadata["popup_state"] = "preview_running"
+            local_metadata["last_event"] = "preview_running"
+            local_metadata["updated_at"] = _utc_now_iso()
+            _persist_progress(percent=10, step="preview_started", state="preview_running", message="preview 생성 단계를 시작했습니다.")
+            local_stage_run = _set_feature_metadata(local_stage_run, local_metadata)
+            local_stage_run = _apply_feature_popup_state(local_stage_run, "preview_running")
+            save_stage_run(local_stage_run)
+            yield _build_feature_sse_event("state", {"run_id": request.run_id, "state": "preview_running"})
+            yield _build_feature_sse_event(
+                "progress",
+                _build_feature_progress_payload(
+                    request.run_id,
+                    percent=10,
+                    step="preview_started",
+                    state="preview_running",
+                    message="preview 생성 단계를 시작했습니다.",
+                ),
+            )
+
+            preview_artifact = await asyncio.to_thread(service.run_preview_phase, request_payload)
+            local_metadata["popup_state"] = "preview_ready"
+            local_metadata["preview_artifact"] = preview_artifact
+            local_metadata["artifact_manifest"] = {
+                **dict(local_metadata.get("artifact_manifest") or {}),
+                "preview_artifact_id": preview_artifact.get("artifact_id"),
+            }
+            local_metadata["last_event"] = "preview_ready"
+            local_metadata["updated_at"] = _utc_now_iso()
+            _persist_progress(percent=45, step="preview_ready", state="preview_ready", message="preview 결과가 준비되었습니다.")
+            local_stage_run = _set_feature_metadata(local_stage_run, local_metadata)
+            local_stage_run = _apply_feature_popup_state(local_stage_run, "preview_ready")
+            save_stage_run(local_stage_run)
+            yield _build_feature_sse_event("artifact", {"run_id": request.run_id, "state": "preview_ready", "artifact": preview_artifact})
+            yield _build_feature_sse_event(
+                "progress",
+                _build_feature_progress_payload(
+                    request.run_id,
+                    percent=45,
+                    step="preview_ready",
+                    state="preview_ready",
+                    message="preview 결과가 준비되었습니다.",
+                ),
+            )
+
+            if not bool(request_payload.get("final_enabled", True)):
+                final_artifact = await asyncio.to_thread(service.run_final_phase, request_payload, preview_artifact)
+                quality_review = await asyncio.to_thread(service.run_quality_gate, request_payload, preview_artifact, final_artifact)
+                manifest = service.build_artifact_manifest(preview_artifact, final_artifact, quality_review)
+                local_metadata["popup_state"] = "completed_preview_only"
+                local_metadata["final_artifact"] = final_artifact
+                local_metadata["quality_review"] = quality_review
+                local_metadata["artifact_manifest"] = manifest
+                local_metadata["last_event"] = "completed_preview_only"
+                local_metadata["updated_at"] = _utc_now_iso()
+                _persist_progress(percent=100, step="completed_preview_only", state="completed_preview_only", message="preview 전용 라이브뷰 실행이 완료되었습니다.")
+                local_stage_run = _set_feature_metadata(local_stage_run, local_metadata)
+                local_stage_run = _apply_feature_popup_state(local_stage_run, "completed_preview_only")
+                save_stage_run(local_stage_run)
+                yield _build_feature_sse_event("completed", {"run_id": request.run_id, "state": "completed_preview_only", "artifact_manifest": manifest, "quality_review": quality_review})
+                yield _build_feature_sse_event(
+                    "progress",
+                    _build_feature_progress_payload(
+                        request.run_id,
+                        percent=100,
+                        step="completed_preview_only",
+                        state="completed_preview_only",
+                        message="preview 전용 라이브뷰 실행이 완료되었습니다.",
+                    ),
+                )
+                return
+
+            local_metadata["popup_state"] = "final_running"
+            local_metadata["last_event"] = "final_running"
+            local_metadata["updated_at"] = _utc_now_iso()
+            _persist_progress(percent=65, step="final_started", state="final_running", message="final 렌더 단계를 시작했습니다.")
+            local_stage_run = _set_feature_metadata(local_stage_run, local_metadata)
+            local_stage_run = _apply_feature_popup_state(local_stage_run, "final_running")
+            save_stage_run(local_stage_run)
+            yield _build_feature_sse_event("state", {"run_id": request.run_id, "state": "final_running"})
+            yield _build_feature_sse_event(
+                "progress",
+                _build_feature_progress_payload(
+                    request.run_id,
+                    percent=65,
+                    step="final_started",
+                    state="final_running",
+                    message="final 렌더 단계를 시작했습니다.",
+                ),
+            )
+
+            final_artifact = await asyncio.to_thread(service.run_final_phase, request_payload, preview_artifact)
+            quality_review = await asyncio.to_thread(service.run_quality_gate, request_payload, preview_artifact, final_artifact)
+            manifest = service.build_artifact_manifest(preview_artifact, final_artifact, quality_review)
+            completed_state = "completed" if bool(quality_review.get("passed")) else "completed_preview_only"
+
+            local_metadata["popup_state"] = "quality_review"
+            local_metadata["quality_review"] = quality_review
+            local_metadata["updated_at"] = _utc_now_iso()
+            _persist_progress(percent=85, step="quality_review", state="quality_review", message="quality gate 결과를 정리하고 있습니다.")
+            local_stage_run = _set_feature_metadata(local_stage_run, local_metadata)
+            local_stage_run = _apply_feature_popup_state(local_stage_run, "quality_review")
+            save_stage_run(local_stage_run)
+            yield _build_feature_sse_event("quality_review", {"run_id": request.run_id, "state": "quality_review", "quality_review": quality_review})
+            yield _build_feature_sse_event(
+                "progress",
+                _build_feature_progress_payload(
+                    request.run_id,
+                    percent=85,
+                    step="quality_review",
+                    state="quality_review",
+                    message="quality gate 결과를 정리하고 있습니다.",
+                ),
+            )
+
+            local_metadata["popup_state"] = completed_state
+            local_metadata["final_artifact"] = final_artifact
+            local_metadata["artifact_manifest"] = manifest
+            local_metadata["last_event"] = completed_state
+            local_metadata["updated_at"] = _utc_now_iso()
+            _persist_progress(percent=100, step="completed", state=completed_state, message="라이브뷰 실행이 완료되었습니다.")
+            local_stage_run = _set_feature_metadata(local_stage_run, local_metadata)
+            local_stage_run = _apply_feature_popup_state(local_stage_run, completed_state)
+            save_stage_run(local_stage_run)
+            yield _build_feature_sse_event("completed", {"run_id": request.run_id, "state": completed_state, "artifact_manifest": manifest, "quality_review": quality_review})
+            yield _build_feature_sse_event(
+                "progress",
+                _build_feature_progress_payload(
+                    request.run_id,
+                    percent=100,
+                    step="completed",
+                    state=completed_state,
+                    message="라이브뷰 실행이 완료되었습니다.",
+                ),
+            )
+        except Exception as exc:
+            local_metadata["popup_state"] = "failed"
+            local_metadata["last_event"] = "failed"
+            local_metadata["error"] = str(exc)
+            local_metadata["updated_at"] = _utc_now_iso()
+            _persist_progress(percent=100, step="failed", state="failed", message=str(exc))
+            local_stage_run = _set_feature_metadata(local_stage_run, local_metadata)
+            local_stage_run = _apply_feature_popup_state(local_stage_run, "failed", str(exc))
+            save_stage_run(local_stage_run)
+            yield _build_feature_sse_event("failed", {"run_id": request.run_id, "state": "failed", "message": str(exc)})
+            yield _build_feature_sse_event(
+                "progress",
+                _build_feature_progress_payload(
+                    request.run_id,
+                    percent=100,
+                    step="failed",
+                    state="failed",
+                    message=str(exc),
+                ),
+            )
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/feature-orchestrate/stage-runs/{run_id}")
+def get_marketplace_feature_stage_run(run_id: str) -> Dict[str, Any]:
+    return _get_feature_stage_run_or_404(run_id)
 
 
 @router.post("/categories")
@@ -918,7 +1335,6 @@ async def customer_orchestrator_chat(
         "stage_run_connected": bool(stage_run_payload),
     }
     return chat_response
-    db.flush()
 
 
 def _resolve_stage_run_for_request(
@@ -2423,7 +2839,7 @@ def _compose_cut_scripts(order: models.AdVideoOrder) -> List[str]:
     ]
     cta_pool = [
         "지금 바로 문의하고 시작하세요",
-        f"마지막 컷에서 {title}와 행동 유도를 함께 고정한다",
+        f"마지막 컷에서 {title}와 행동 유도를 동시에 고정한다",
         "혜택 요약 뒤 즉시 행동 유도로 마무리한다",
     ]
 
@@ -2609,8 +3025,8 @@ def _scene_templates_for_subject(order: models.AdVideoOrder) -> List[Dict[str, s
         return [
             {"role": "flow_intro", "camera": "wide flow shot", "camera_move": "slow floating drift", "asset_source": primary_subject_asset, "action": "the whole scene establishes visual rhythm and continuous motion", "gesture": "movement travels across the full frame instead of isolating one element"},
             {"role": "flow_focus", "camera": "medium composition shot", "camera_move": "gentle lateral glide", "asset_source": primary_subject_asset, "action": "the composition keeps subject, background, and copy in one coherent motion field", "gesture": "frame-wide motion carries the eye naturally forward"},
-            {"role": "flow_hero", "camera": "hero scene shot", "camera_move": "orbital drift", "asset_source": secondary_asset, "action": "the key visual stays integrated with the background and lighting instead of feeling pasted on", "gesture": "camera reveals detail through the whole composition"},
-            {"role": "flow_detail", "camera": "close cinematic shot", "camera_move": "micro slide", "asset_source": secondary_asset, "action": "detail and texture appear as part of the same visual flow", "gesture": "small motion accents keep continuity intact"},
+            {"role": "flow_hero", "camera": "hero scene shot", "camera_move": "orbital drift", "asset_source": secondary_asset, "action": "product gets a clean premium beauty shot", "gesture": "camera-led product reveal"},
+            {"role": "flow_detail", "camera": "close cinematic shot", "camera_move": "macro slide", "asset_source": secondary_asset, "action": "detail and texture appear as part of the same visual flow", "gesture": "small motion accents keep continuity intact"},
             {"role": "flow_transition", "camera": "tracking bridge shot", "camera_move": "smooth forward motion", "asset_source": primary_subject_asset, "action": "the scene transitions fluidly with background, lighting, and framing locked together", "gesture": "movement connects one beat to the next without abrupt separation"},
             {"role": "flow_close", "camera": "closing composition shot", "camera_move": "slow settle", "asset_source": secondary_asset, "action": "the final frame resolves as one consistent commercial image", "gesture": "all motion calms into a stable branded finish"},
         ]
@@ -2822,25 +3238,13 @@ def _compose_storyboard_review(order: models.AdVideoOrder) -> List[Dict[str, Any
     return []
 
 
-def _resolve_storyboard_scene_source(
-    order: models.AdVideoOrder,
-    scene: Optional[Dict[str, Any]],
-) -> Optional[str]:
-    portrait_prompt = _normalize_image_reference(getattr(order, "portrait_image_prompt", None))
-    product_prompts = _get_product_image_prompts(order)
-    if scene:
-        asset_ref = _normalize_image_reference(scene.get("asset_ref"))
-        if asset_ref and _has_ad_image_reference(asset_ref):
-            return asset_ref
-        asset_source = str(scene.get("asset_source") or "portrait").strip().lower()
-        if asset_source == "product" and product_prompts:
-            product_index = scene.get("product_index")
-            if isinstance(product_index, int) and 0 <= product_index < len(product_prompts):
-                return product_prompts[product_index]
-            return product_prompts[0]
-    if portrait_prompt:
-        return portrait_prompt
-    return product_prompts[0] if product_prompts else None
+def _resolve_scene_source(scene: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not scene:
+        return None
+    asset_ref = _normalize_image_reference(scene.get("asset_ref"))
+    if asset_ref and _has_ad_image_reference(asset_ref):
+        return asset_ref
+    return None
 
 
 def _build_scene_keyframes(order: models.AdVideoOrder, storyboard: List[Dict[str, Any]]) -> List[str]:
@@ -2851,8 +3255,8 @@ def _build_scene_keyframes(order: models.AdVideoOrder, storyboard: List[Dict[str
 
     fallback_keyframes: List[str] = []
     for scene in storyboard:
-        source_prompt = _resolve_storyboard_scene_source(order, scene)
-        if source_prompt and _has_ad_image_reference(source_prompt):
+        source_prompt = _resolve_scene_source(scene)
+        if source_prompt:
             fallback_keyframes.append(source_prompt)
 
     if _stability_profile_for_order(order) == "stable_90":
@@ -2875,23 +3279,13 @@ def _build_scene_keyframes(order: models.AdVideoOrder, storyboard: List[Dict[str
     with tempfile.TemporaryDirectory(prefix="ad_scene_keyframes_", dir=str(temp_root)) as tmpdir:
         resolved_sources: Dict[str, Optional[str]] = {}
         for index, scene in enumerate(storyboard):
-            source_prompt = _resolve_scene_source(scene)
-            if not source_prompt:
-                continue
+            source_prompt = _resolve_scene_source(scene) or default_source_prompt
+            source_image = _load_ad_image_from_prompt(source_prompt, tmpdir, file_stem=f"scene_{index + 1}")
 
-            if source_prompt not in resolved_sources:
-                source_path = _load_ad_image_from_prompt(
-                    normalized_prompt or None,
-                    tmpdir,
-                    file_stem=f"scene_{len(resolved_sources) + 1}",
-                )
-                resolved_sources[source_prompt] = str(source_path) if source_path and source_path.exists() else None
-
-            source_path = resolved_sources.get(source_prompt)
-            if not source_path:
-                if _has_ad_image_reference(source_prompt):
-                    keyframes.append(source_prompt)
-                continue
+            if source_image and source_image.exists():
+                keyframe = str(source_image)
+            else:
+                keyframe = None
 
             asset_source = str(scene.get("asset_source") or "portrait").strip().lower()
             scene_prompt = _scene_generation_prompt(order, scene)
@@ -2899,7 +3293,7 @@ def _build_scene_keyframes(order: models.AdVideoOrder, storyboard: List[Dict[str
             try:
                 result = stylize_reference_image(
                     prompt=scene_prompt,
-                    source_image_path=source_path,
+                    source_image_path=keyframe,
                     negative_prompt=negative_prompt,
                     width=1024,
                     height=576,
@@ -2913,7 +3307,7 @@ def _build_scene_keyframes(order: models.AdVideoOrder, storyboard: List[Dict[str
                 if image_base64:
                     keyframes.append(f"data:image/png;base64,{image_base64}")
                     continue
-            except Exception as exc:
+            except Exception:
                 logger.warning(
                     "[marketplace] scene keyframe generation failed for order %s cut %s: %s",
                     order.id,
@@ -2921,8 +3315,8 @@ def _build_scene_keyframes(order: models.AdVideoOrder, storyboard: List[Dict[str
                     exc,
                 )
 
-            if _has_ad_image_reference(source_prompt):
-                keyframes.append(source_prompt)
+            if keyframe and _has_ad_image_reference(keyframe):
+                keyframes.append(keyframe)
 
     return keyframes or fallback_keyframes
 
@@ -2960,17 +3354,31 @@ def _build_ad_engine_render_payload(order: models.AdVideoOrder) -> Dict[str, Any
         "motion_profile": _effective_motion_profile_for_order(order),
         "target_output_fps": _target_output_fps_for_order(order),
         "target_output_frames": _target_output_frame_hint_for_order(order),
-        "voice_gender": order.voice_gender,
-        "duration_seconds": _order_duration_seconds(order),
-        "cut_seconds": _effective_cut_seconds_for_order(order),
-        "cut_count": _effective_cut_count_for_order(order),
-        "visual_style": order.visual_style,
-        "subtitle_speed": _order_subtitle_speed(order),
-        "render_quality": _effective_render_quality_for_order(order),
-        "audio_volume": _order_audio_volume(order),
-        "bgm_enabled": bgm_enabled,
-        "bgm_mood": bgm_mood,
-        "bgm_volume": bgm_volume,
+        "voice_track": str(order.caption_text or "").strip() or None,
+        "continuity_rules": [
+            "scene flow continuity",
+            "photoreal identity continuity",
+            "stable environment realism",
+            "cinematic camera continuity",
+        ],
+        "hero_props": [str(order.title or "hero product").strip() or "hero product"],
+        "sequence_beats": [
+            {
+                "objective": str(scene.get("title") or f"scene {index + 1}").strip() or f"scene {index + 1}",
+                "emotional_state": "conversion intent" if index == len(storyboard) - 1 else "controlled realism",
+                "blocking_summary": str(scene.get("visual_focus") or scene.get("scene_prompt") or scene.get("title") or "cinematic scene progression").strip(),
+                "cta_required": index == len(storyboard) - 1,
+            }
+            for index, scene in enumerate(storyboard[:12])
+        ],
+        "identity_references": [
+            str(getattr(order, "portrait_image_prompt", "")).strip()
+        ],
+        "environment_references": [
+            ref for ref in _get_product_image_prompts(order)[:3] + [str(getattr(order, "image_prompt", "")).strip()]
+            if ref
+        ],
+        "operator_note": f"ad_order_id={order.id}; public_job_id={order.public_job_id}",
     }
     if keyframes:
         payload["keyframe_image_paths"] = keyframes
@@ -3670,15 +4078,6 @@ def _build_movie_studio_payload_from_order(order: models.AdVideoOrder) -> Dict[s
         }
         for index, scene in enumerate(storyboard[:12])
     ]
-    if not sequence_beats:
-        sequence_beats = [
-            {
-                "objective": str(order.title or "movie studio scene flow").strip() or "movie studio scene flow",
-                "emotional_state": "controlled realism",
-                "blocking_summary": str(order.caption_text or order.background_prompt or order.title or "cinematic staging").strip(),
-                "cta_required": True,
-            }
-        ]
 
     identity_references: List[str] = []
     portrait_reference = str(getattr(order, "portrait_image_prompt", "") or "").strip()

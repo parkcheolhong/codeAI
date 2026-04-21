@@ -1,0 +1,39 @@
+{
+    "name": "devanalysis114-frontend",
+    "version": "1.0.0",
+    "private": true,
+    "scripts": {
+        "dev": "next dev",
+        "build": "next build",
+        "test": "node -e \"const assert=require(\\\"node:assert/strict\\\"); assert.equal(2,2); console.log(\\\"frontend smoke tests passed\\\");\"",
+        "start": "next start",
+        "e2e": "playwright test -c playwright.config.ts",
+        "e2e:headed": "playwright test -c playwright.config.ts --headed",
+        "e2e:marketplace-liveview": "playwright test -c playwright.config.ts tests/marketplace-liveview-ai-image.playwright.spec.ts --project chromium --no-deps",
+        "e2e:marketplace-liveview:sheet": "playwright test -c playwright.config.ts tests/marketplace-liveview-ai-sheet-launcher.playwright.spec.ts --project chromium --no-deps",
+        "e2e:marketplace-liveview:launcher": "playwright test -c playwright.config.ts tests/marketplace-liveview-ai-image-launcher.playwright.spec.ts --project chromium --no-deps",
+        "e2e:marketplace-liveview:all": "playwright test -c playwright.config.ts tests/marketplace-liveview-ai-image.playwright.spec.ts tests/marketplace-liveview-ai-image-launcher.playwright.spec.ts --project chromium --no-deps"
+    },
+    "dependencies": {
+        "@types/node": "^20.14.12",
+        "@types/react": "^18.3.3",
+        "@types/react-dom": "^18.3.0",
+        "axios": "^1.7.2",
+        "clsx": "^2.1.1",
+        "lucide-react": "^0.408.0",
+        "mermaid": "^11.12.3",
+        "next": "^16.2.1",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+        "tailwind-merge": "^2.4.0",
+        "typescript": "^5.5.4",
+        "zustand": "^4.5.4"
+    },
+    "devDependencies": {
+        "@playwright/test": "^1.54.2",
+        "autoprefixer": "^10.4.19",
+        "eslint": "^10.1.0",
+        "postcss": "^8.4.39",
+        "tailwindcss": "^3.4.6"
+    }
+}

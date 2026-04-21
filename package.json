@@ -1,0 +1,35 @@
+{
+    "scripts": {
+        "dev:marketplace": "cmd /c \"set LOCAL_FRONTEND_ROLE=marketplace&& npm --prefix frontend/frontend run dev -- --port 3000\"",
+        "dev:admin": "cmd /c \"set LOCAL_FRONTEND_ROLE=admin&& npm --prefix frontend/frontend run dev -- --port 3005\"",
+        "build:admin": "npm --prefix frontend/frontend run build",
+        "build:frontend": "npm run build:admin",
+        "e2e:marketplace-liveview": "cmd /c \"cd /d frontend\\frontend && set PLAYWRIGHT_ADMIN_BASE_URL=http://127.0.0.1:3011&& npm run e2e:marketplace-liveview\"",
+        "e2e:marketplace-liveview:sheet": "cmd /c \"cd /d frontend\\frontend && set PLAYWRIGHT_MARKETPLACE_BASE_URL=http://127.0.0.1:3000&& npm run e2e:marketplace-liveview:sheet\"",
+        "e2e:marketplace-liveview:launcher": "cmd /c \"cd /d frontend\\frontend && set PLAYWRIGHT_ADMIN_BASE_URL=http://127.0.0.1:3011&& npm run e2e:marketplace-liveview:launcher\"",
+        "e2e:marketplace-liveview:all": "cmd /c \"cd /d frontend\\frontend && set PLAYWRIGHT_ADMIN_BASE_URL=http://127.0.0.1:3011&& npm run e2e:marketplace-liveview:all\"",
+        "start:platform": "powershell -ExecutionPolicy Bypass -File .\\scripts\\start_all_in_one.ps1",
+        "stop:platform": "powershell -ExecutionPolicy Bypass -File .\\scripts\\stop_all_in_one.ps1",
+        "start:backend": "powershell -ExecutionPolicy Bypass -File .\\scripts\\start_backend_stack.ps1",
+        "stop:backend": "powershell -ExecutionPolicy Bypass -File .\\scripts\\stop_backend_stack.ps1",
+        "start:local": "powershell -ExecutionPolicy Bypass -File .\\scripts\\start_local_all_in_one.ps1",
+        "stop:local": "powershell -ExecutionPolicy Bypass -File .\\scripts\\stop_local_all_in_one.ps1",
+        "health:platform": "powershell -ExecutionPolicy Bypass -File .\\scripts\\ops_health_check.ps1",
+        "ensure:admin": "powershell -ExecutionPolicy Bypass -File .\\scripts\\ensure_fixed_admin_account.ps1",
+        "start:all": "npm run start:platform",
+        "stop:all": "npm run stop:platform",
+        "start": "npm run start:platform",
+        "stop": "npm run stop:platform",
+        "health:ops": "npm run health:platform"
+    },
+    "dependencies": {
+        "eslint-config-next": "^16.2.1",
+        "http-proxy": "^1.18.1",
+        "next": "^16.2.1",
+        "react": "^19.2.4",
+        "react-dom": "^19.2.4"
+    },
+    "devDependencies": {
+        "playwright": "^1.59.1"
+    }
+}
