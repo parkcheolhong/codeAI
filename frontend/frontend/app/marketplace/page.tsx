@@ -1,3 +1,5 @@
+"use client";
+
 import * as React from 'react';
 import Link from 'next/link';
 import FeatureLauncherGrid from '@/components/marketplace/feature-launcher-grid';
@@ -625,6 +627,7 @@ export default function MarketplacePage() {
             <FeatureOrchestratorPopup
                 isOpen={featureOrchestrator.isPopupOpen}
                 activeFeatureId={featureOrchestrator.activeFeatureId}
+                featureMeta={featureOrchestrator.activeFeatureMeta}
                 popupMode={featureOrchestrator.activeFeature?.popup_mode}
                 title={featureOrchestrator.activeFeature?.title || 'AI 엑셀 시트'}
                 featureSummary={featureOrchestrator.activeFeature?.summary || '시트 schema preview 와 최종 workbook 패키지를 생성하는 실행형 backend'}
