@@ -1,0 +1,17 @@
+torch>=2.1.0
+transformers>=4.36.0
+accelerate>=0.25.0
+bitsandbytes>=0.41.0
+scipy>=1.11.0
+sentencepiece>=0.1.99
+protobuf>=4.25.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+python-multipart>=0.0.6
+huggingface-hub>=0.19.0
+einops>=0.7.0
+xformers>=0.0.23
+optimum>=1.14.0
+auto-gptq>=0.5.0
+autoawq>=0.1.7
